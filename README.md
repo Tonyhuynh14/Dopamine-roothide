@@ -20,11 +20,11 @@ special thanks to: @opa334 @theosdev @ProcursusTeam @eveyineee @jakeashacks
 
 # More Info
 
-- Sileo Discrod Server: https://discord.gg/Udn4kQg
+- Havoc Discord Server: https://discord.gg/s2zc45h
 
 - Chariz Discord Server: https://discord.gg/sEzwNF9
 
-- Havoc Discord Server: https://discord.gg/s2zc45h
-
 - Zebra Discord Server: https://discord.gg/6CPtHBU
+  
+- Sileo Discrod Server: https://discord.gg/Udn4kQg
 
