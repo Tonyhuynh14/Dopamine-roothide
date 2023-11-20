@@ -14,17 +14,19 @@ This project is the RootHide implementation based on Dopamine Jailbreak.
 
 - for Developers: dear developers, many tweaks just need to be recompiled to run with roothide, or minor modifications, see the developer document: https://github.com/RootHide/Developer
 
-- for updates and support, follow [@RootHideDev](https://twitter.com/RootHideDev) on twitter or join our Discord server: https://discord.com/invite/scqCkumAYp
+- for updates and support, follow [@RootHideDev](https://twitter.com/RootHideDev) on twitter or join our [Discord server](https://discord.com/invite/scqCkumAYp).
 
 special thanks to: @opa334 @theosdev @ProcursusTeam @eveyineee @jakeashacks
 
 # More Info
 
-- Havoc Discord Server: https://discord.gg/s2zc45h
+- RootHide Discord Server: https://discord.com/invite/scqCkumAYp
 
-- Chariz Discord Server: https://discord.gg/sEzwNF9
+- Havoc  Discord Server: https://discord.gg/s2zc45h
 
-- Zebra Discord Server: https://discord.gg/6CPtHBU
+- Chariz  Discord Server: https://discord.gg/sEzwNF9
+
+- Zebra  Discord Server: https://discord.gg/6CPtHBU
   
-- Sileo Discrod Server: https://discord.gg/Udn4kQg
+- Sileo  Discrod Server: https://discord.gg/Udn4kQg
 
