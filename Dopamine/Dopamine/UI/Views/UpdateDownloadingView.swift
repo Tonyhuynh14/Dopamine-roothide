@@ -78,14 +78,23 @@ struct UpdateDownloadingView: View {
                                 }
                             }
                         } else {
-                            updateState = .updating
-                            DispatchQueue.global(qos: .userInitiated).async {
-                                updateEnvironment()
-                            }
+                            reboot();
                         }
                         
                     } label: {
-                        Label(title: { Text("Button_Update")  }, icon: { Image(systemName: "arrow.down") })
+                        Label(title: {
+                            if type == .environment {
+                                Text("Reboot Device")
+                            } else {
+                                Text("Button_Update")
+                            }
+                        }, icon: {
+                            if type == .environment {
+                                Image(systemName: "arrow.clockwise.circle")
+                            } else {
+                                Image(systemName: "arrow.down")
+                            }
+                        })
                             .foregroundColor(.white)
                             .padding()
                             .frame(maxWidth: 280)
@@ -180,8 +189,8 @@ struct UpdateDownloadingView: View {
     }
     
     func downloadUpdateAndInstall() async throws {
-        let owner = "opa334"
-        let repo = "Dopamine"
+        let owner = "RootHide"
+        let repo = "Dopamine-roothide"
         
         // Get the releases
         let releasesURL = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/releases")!
@@ -200,24 +209,28 @@ struct UpdateDownloadingView: View {
             throw "Could not find download URL for ipa"
         }
         
-        // Download the asset
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            downloadProgress.totalUnitCount = 1
-            group.addTask {
-                let (url, _) = try await URLSession.shared.download(from: downloadURL, progress: downloadProgress)
-                if (isJailbroken()) {
-                    update(tipaURL: url)
-                } else {
-                    guard let dopamineUpdateURL = URL(string: "apple-magnifier://install?url=\(url.absoluteString)") else {
-                        return
-                    }
-                    await UIApplication.shared.open(dopamineUpdateURL)
-                    exit(0)
-                    return
-                }
-            }
-            try await group.waitForAll()
-        }
+//        // Download the asset
+//        try await withThrowingTaskGroup(of: Void.self) { group in
+//            downloadProgress.totalUnitCount = 1
+//            group.addTask {
+//                let (url, _) = try await URLSession.shared.download(from: downloadURL, progress: downloadProgress)
+//                if (isJailbroken()) {
+//                    update(tipaURL: url)
+//                } else {
+//                    guard let dopamineUpdateURL = URL(string: "apple-magnifier://install?url=\(url.absoluteString)") else {
+//                        return
+//                    }
+//                    await UIApplication.shared.open(dopamineUpdateURL)
+//                    exit(0)
+//                    return
+//                }
+//            }
+//            try await group.waitForAll()
+//        }
+        
+        await UIApplication.shared.open(downloadURL)
+        exit(0)
+        return
     }
 }
 

@@ -6,22 +6,23 @@
 //
 
 import UIKit
+import Foundation
 import Fugu15KernelExploit
 import CBindings
 
-var fakeRootPath: String? = nil
 public func rootifyPath(path: String) -> String? {
+    var fakeRootPath: String? = nil
     if fakeRootPath == nil {
         fakeRootPath = Bootstrapper.locateExistingFakeRoot()
     }
     if fakeRootPath == nil {
         return nil
     }
-    return fakeRootPath! + "/procursus/" + path
+    return fakeRootPath! + "/" + path
 }
 
 func getBootInfoValue(key: String) -> Any? {
-    guard let bootInfoPath = rootifyPath(path: "/basebin/boot_info.plist") else {
+    guard let bootInfoPath = rootifyPath(path: "/var/.boot_info.plist") else {
         return nil
     }
     guard let bootInfo = NSDictionary(contentsOfFile: bootInfoPath) else {
@@ -31,10 +32,11 @@ func getBootInfoValue(key: String) -> Any? {
 }
 
 func respring() {
-    guard let sbreloadPath = rootifyPath(path: "/usr/bin/sbreload") else {
-        return
-    }
-    _ = execCmd(args: [sbreloadPath])
+//    guard let sbreloadPath = rootifyPath(path: "/usr/bin/sbreload") else {
+//        return
+//    }
+//    _ = execCmd(args: [sbreloadPath])
+    _ = execCmd(args: [rootifyPath(path: "/usr/bin/uicache")!, "-ar"])
 }
 
 func userspaceReboot() {
@@ -54,20 +56,39 @@ func userspaceReboot() {
     }
     
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: {
+        sync();
         _ = execCmd(args: [rootifyPath(path: "/basebin/jbctl")!, "reboot_userspace"])
     })
 }
 
 func reboot() {
+//    if isJailbroken() {
+//        if let paths = try? FileManager.default.contentsOfDirectory(atPath: jbrootPath("/Applications"))
+//        {
+//            for path in paths {
+//                _ = execCmd(args: [rootifyPath(path: "/usr/bin/uicache")!, "-u", "/Applications/\(path)"])
+//            }
+//        }
+//    }
+    sync();
     _ = execCmd(args: [CommandLine.arguments[0], "reboot"])
 }
 
 func isJailbroken() -> Bool {
+    
     if isSandboxed() { return false } // ui debugging
+    
+    if __isRootlessDopamineJailbroken() {
+        return false
+    }
     
     var jbdPid: pid_t = 0
     jbdGetStatus(nil, nil, &jbdPid)
     return jbdPid != 0
+}
+
+func isRootlessDopamineJailbroken() -> Bool {
+    return __isRootlessDopamineJailbroken();
 }
 
 func isBootstrapped() -> Bool {
@@ -135,28 +156,11 @@ func changeMobilePassword(newPassword: String) {
     guard let dashPath = rootifyPath(path: "/usr/bin/dash") else {
         return;
     }
+    //#printf "%s\n" "alpine" | @MEMO_PREFIX@@MEMO_SUB_PREFIX@/sbin/pw usermod root -h 0
     guard let pwPath = rootifyPath(path: "/usr/sbin/pw") else {
         return;
     }
     _ = execCmd(args: [dashPath, "-c", String(format: "printf \"%%s\\n\" \"\(newPassword)\" | \(pwPath) usermod 501 -h 0")])
-}
-
-
-func changeEnvironmentVisibility(hidden: Bool) {
-    if hidden {
-        _ = execCmd(args: [CommandLine.arguments[0], "hide_environment"])
-    }
-    else {
-        _ = execCmd(args: [CommandLine.arguments[0], "unhide_environment"])
-    }
-
-    if isJailbroken() {
-        jbdSetFakelibVisible(!hidden)
-    }
-}
-
-func isEnvironmentHidden() -> Bool {
-    return !FileManager.default.fileExists(atPath: "/var/jb")
 }
 
 func update(tipaURL: URL) {

@@ -39,6 +39,8 @@ struct JailbreakView: View {
         var action: (() -> ())? = nil
     }
     
+    @State var rootlessDopamineJailbroken = false
+    
     @State var isSettingsPresented = false
     @State var isCreditsPresented = false
     
@@ -181,6 +183,11 @@ struct JailbreakView: View {
                 UIApplication.shared.open(.init(string: "https://www.youtube.com/watch?v=dQw4w9WgXcQ")!)
             }
         }
+        .alert("Jailbroken", isPresented: $rootlessDopamineJailbroken, actions: {
+            Button("OK", role: .none) {
+                //reboot();
+            }
+        }, message: { Text("rootless dopamine jailbroken at present, please reboot the device.") })
     }
     
     
@@ -278,6 +285,11 @@ struct JailbreakView: View {
             Button {
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 
+                if isRootlessDopamineJailbroken() {
+                    rootlessDopamineJailbroken = true
+                    return
+                }
+                
                 if requiresEnvironmentUpdate {
                     showingUpdatePopupType = .environment
                 } else {
@@ -290,54 +302,54 @@ struct JailbreakView: View {
             } label: {
                 Label(title: {
                     if Fugu15.supportsThisDeviceBool() {
-                        if !requiresEnvironmentUpdate {
-                            if isJailbroken() {
-                                Text("Status_Title_Jailbroken")
-                            } else {
-                                switch jailbreakingProgress {
-                                case .idle:
-                                    Text("Button_Jailbreak_Title")
-                                case .jailbreaking:
-                                    Text("Status_Title_Jailbreaking")
-                                case .selectingPackageManager:
-                                    Text("Status_Title_Select_Package_Managers")
-                                case .finished:
-                                    if jailbreakingError == nil {
-                                        Text("Status_Title_Jailbroken")
-                                    } else {
-                                        Text("Status_Title_Unsuccessful")
-                                    }
-                                }
-                            }
-                        } else {
-                            Text("Button_Update_Environment")
-                        }
+	                    if !requiresEnvironmentUpdate {
+	                        if isJailbroken() {
+	                            Text("Status_Title_Jailbroken")
+	                        } else {
+	                            switch jailbreakingProgress {
+	                            case .idle:
+	                                Text("Button_Jailbreak_Title")
+	                            case .jailbreaking:
+	                                Text("Status_Title_Jailbreaking")
+	                            case .selectingPackageManager:
+	                                Text("Status_Title_Select_Package_Managers")
+	                            case .finished:
+	                                if jailbreakingError == nil {
+	                                    Text("Status_Title_Jailbroken")
+	                                } else {
+	                                    Text("Status_Title_Unsuccessful")
+	                                }
+	                            }
+	                        }
+	                    } else {
+	                        Text("Button_Update_Environment")
+	                    }
                     } else {
                         Text("Unsupported")
                     }
                     
                 }, icon: {
                     if Fugu15.supportsThisDeviceBool() {
-                        if !requiresEnvironmentUpdate {
-                            ZStack {
-                                switch jailbreakingProgress {
-                                case .jailbreaking:
-                                    LoadingIndicator(animation: .doubleHelix, color: .white, size: .small)
-                                case .selectingPackageManager:
-                                    Image(systemName: "shippingbox")
-                                case .finished:
-                                    if jailbreakingError == nil {
-                                        Image(systemName: "lock.open")
-                                    } else {
-                                        Image(systemName: "lock.slash")
-                                    }
-                                case .idle:
-                                    Image(systemName: "lock.open")
-                                }
-                            }
-                        } else {
-                            Image(systemName: "doc.badge.arrow.up")
-                        }
+	                    if !requiresEnvironmentUpdate {
+	                        ZStack {
+	                            switch jailbreakingProgress {
+	                            case .jailbreaking:
+	                                LoadingIndicator(animation: .doubleHelix, color: .white, size: .small)
+	                            case .selectingPackageManager:
+	                                Image(systemName: "shippingbox")
+	                            case .finished:
+	                                if jailbreakingError == nil {
+	                                    Image(systemName: "lock.open")
+	                                } else {
+	                                    Image(systemName: "lock.slash")
+	                                }
+	                            case .idle:
+	                                Image(systemName: "lock.open")
+	                            }
+	                        }
+	                    } else {
+	                        Image(systemName: "doc.badge.arrow.up")
+	                    }
                     } else {
                         Image(systemName: "lock.slash")
                     }
@@ -442,9 +454,8 @@ struct JailbreakView: View {
     func uiJailbreak() {
         jailbreakingProgress = .jailbreaking
         let dpDefaults = dopamineDefaults()
+        dpDefaults.set(NSLocale.current.identifier, forKey: "locale")
         dpDefaults.set(dpDefaults.integer(forKey: "total_jailbreaks") + 1, forKey: "total_jailbreaks")
-        dpDefaults.synchronize()
-        
         DispatchQueue(label: "Dopamine").async {
             sleep(1)
             
@@ -455,18 +466,19 @@ struct JailbreakView: View {
                 if e == nil {
                     dpDefaults.set(dpDefaults.integer(forKey: "successful_jailbreaks") + 1, forKey: "successful_jailbreaks")
                     dpDefaults.synchronize()
+                    
                     UINotificationFeedbackGenerator().notificationOccurred(.success)
                     let tweakInjectionEnabled = dpDefaults.bool(forKey: "tweakInjectionEnabled")
                     
                     Logger.log(NSLocalizedString("Restarting Userspace", comment: ""), type: .continuous, isStatus: true)
                     
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                        if tweakInjectionEnabled {
+                        //if tweakInjectionEnabled {
                             userspaceReboot()
-                        } else {
-                            respring()
-                            exit(0)
-                        }
+//                        } else {
+//                            respring()
+//                            exit(0)
+//                        }
                     }
                 } else {
                     UINotificationFeedbackGenerator().notificationOccurred(.error)
@@ -529,8 +541,8 @@ struct JailbreakView: View {
     
     func checkForUpdates() async throws {
         if let currentAppVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String {
-            let owner = "opa334"
-            let repo = "Dopamine"
+            let owner = "RootHide"
+            let repo = "Dopamine-roothide"
             
             // Get the releases
             let releasesURL = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/releases")!

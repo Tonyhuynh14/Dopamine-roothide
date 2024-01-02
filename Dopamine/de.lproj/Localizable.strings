@@ -42,7 +42,7 @@
 
 "Credits_Button_Source_Code" = "Quellcode";
 
-"Credits_Footer_Dopamine_Version %@\nOS:%@" = "Dopamine version %@\n%@";
+"Credits_Footer_Dopamine_Version %@\nOS:%@" = "Dopamine(roothide) version %@\n%@";
 
 "Credits_Header_Special_Thanks" = "Besonderen Dank:";
 
@@ -119,8 +119,6 @@
 "Title_Made_By" = "von opa334, évelyne\nUI von sourceloc\nBasiert auf Fugu15";
 
 "Title_Supported_iOS_Versions" = "iOS 15.0 - 15.4.1 | A12 - A15, M1";
-
-"Unsupported" = "Nicht unterstützt";
 
 "Update_Log_Hint_Scrollable" = "Die Protokollansicht ist durchscrollbar";
 

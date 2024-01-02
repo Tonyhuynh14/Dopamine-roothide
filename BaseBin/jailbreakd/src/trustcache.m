@@ -124,7 +124,7 @@ void dynamicTrustCacheUploadCDHashesFromArray(NSArray *cdHashArray)
 
 void dynamicTrustCacheUploadDirectory(NSString *directoryPath)
 {
-	NSString *basebinPath = [[prebootPath(@"basebin") stringByResolvingSymlinksInPath] stringByStandardizingPath];
+	NSString *basebinPath = [[jbrootPath(@"/basebin") stringByResolvingSymlinksInPath] stringByStandardizingPath];
 	NSString *resolvedPath = [[directoryPath stringByResolvingSymlinksInPath] stringByStandardizingPath];
 	NSDirectoryEnumerator<NSURL *> *directoryEnumerator = [[NSFileManager defaultManager] enumeratorAtURL:[NSURL fileURLWithPath:resolvedPath isDirectory:YES] 
 																			   includingPropertiesForKeys:@[NSURLIsSymbolicLinkKey]
@@ -148,7 +148,7 @@ void dynamicTrustCacheUploadDirectory(NSString *directoryPath)
 						mappedInPage = trustCacheFindFreePage();
 					}
 
-					JBLogDebug("[dynamicTrustCacheUploadDirectory %s] Uploading cdhash of %s", directoryPath.UTF8String, enumURL.path.UTF8String);
+					JBLogDebug("[dynamicTrustCacheUploadDirectory %s] Uploading cdhash of %s", directoryPath.UTF8String, enumURL.path.UTF8String);					
 					[mappedInPage addEntry:entry];
 				});
 			}
@@ -170,7 +170,7 @@ void rebuildDynamicTrustCache(void)
 	}
 
 	JBLogDebug("Triggering initial trustcache upload...");
-	dynamicTrustCacheUploadDirectory(prebootPath(nil));
+	dynamicTrustCacheUploadDirectory(jbrootPath(@"/"));
 	JBLogDebug("Initial TrustCache upload done!");
 }
 

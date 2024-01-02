@@ -15,7 +15,7 @@ int envbuf_len(const char *envp[])
 
 char **envbuf_mutcopy(const char *envp[])
 {
-	if (envp == NULL) return NULL;
+	if (envp == NULL) return NULL; //opa said don't comment this
 
 	int len = envbuf_len(envp);
 	char **envcopy = malloc(len * sizeof(char *));
@@ -72,7 +72,7 @@ const char *envbuf_getenv(const char *envp[], const char *name)
 	return NULL;
 }
 
-void envbuf_setenv(char **envpp[], const char *name, const char *value)
+void envbuf_setenv(char **envpp[], const char *name, const char *value, int override)
 {
 	if (envpp) {
 		char **envp = *envpp;
@@ -89,6 +89,10 @@ void envbuf_setenv(char **envpp[], const char *name, const char *value)
 
 		int existingEnvIndex = envbuf_find((const char **)envp, name);
 		if (existingEnvIndex >= 0) {
+			if(!override) {
+				free(envToSet);
+				return;
+			}
 			// if already exists: deallocate old variable, then replace pointer
 			free(envp[existingEnvIndex]);
 			envp[existingEnvIndex] = envToSet;

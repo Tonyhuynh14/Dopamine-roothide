@@ -28,13 +28,15 @@ struct AboutView: View {
         ("ProcursusTeam", "http://github.com/ProcursusTeam"),
         ("kirb", "http://github.com/kirb"),
         ("Amy While", "http://github.com/elihwyma"),
+        ("roothide", "http://github.com/RootHide"),
+        ("Shadow-", "http://iosjb.top/"),
     ]
     
     var body: some View {
         VStack {
             VStack {
                 Button(action: {
-                    openURL(URL(string: "https://github.com/opa334/Dopamine")!)
+                    openURL(URL(string: "https://github.com/RootHide/Dopamine-roothide")!)
                 }) {
                     HStack {
                         Spacer()
@@ -66,7 +68,7 @@ struct AboutView: View {
                     .padding(.horizontal, 32)
                 }
                 Button(action: {
-                    openURL(URL(string: "https://discord.gg/jb")!)
+                    openURL(URL(string: "https://discord.gg/scqCkumAYp")!)
                 }) {
                     HStack {
                         Spacer()

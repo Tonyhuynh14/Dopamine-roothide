@@ -3,9 +3,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <dispatch/dispatch.h>
+#include <pthread.h>
 
-bool debugLogsEnabled = false;
-bool errorLogsEnabled = false;
+
+bool debugLogsEnabled = true;
+bool errorLogsEnabled = true;
 #define LOGGING_PATH "/var/log/"
 
 const char *JBLogGetProcessName(void)
@@ -41,9 +43,9 @@ void JBDLogV(const char* prefix, const char *format, va_list va)
 		const char *processName = JBLogGetProcessName();
 
 		time_t t = time(NULL);
-		struct tm *tm = localtime(&t);
+		//struct tm *tm = localtime(&t);
 		char timestamp[64];
-		sprintf(&timestamp[0], "%lu", t);
+		sprintf(&timestamp[0], "%lu-%d", t, getpid());
 
 		logFilePath = malloc(strlen(LOGGING_PATH) + strlen(processName) + strlen(timestamp) + 6);
 		strcpy(logFilePath, LOGGING_PATH);
@@ -60,17 +62,29 @@ void JBDLogV(const char* prefix, const char *format, va_list va)
 		char stime[32];
 		ltime = time(NULL);
 
-		fprintf(logFile, "[%lu] [%s] ", ltime, prefix);
+		__uint64_t tid=0;
+		pthread_threadid_np(0, &tid);
+		fprintf(logFile, "[%lu] [%lld] [%s] ", ltime, tid, prefix);
 		vfprintf(logFile, format, va);
 		fprintf(logFile, "\n");
 
 		fflush(logFile);
+		fsync(fileno(logFile));
 		fclose(logFile);
 	}
 }
 
+bool jblogenable = false;
+
 void JBLogDebug(const char *format, ...)
 {
+	static dispatch_once_t onceToken;
+	dispatch_once (&onceToken, ^{
+		if(access(LOGGING_PATH "/.jblogenable",F_OK)==0) jblogenable=true;
+	});
+
+	if(!jblogenable) return;
+
 	if (!debugLogsEnabled) return;
 	va_list va;
 	va_start(va, format);
@@ -80,6 +94,13 @@ void JBLogDebug(const char *format, ...)
 
 void JBLogError(const char *format, ...)
 {
+	static dispatch_once_t onceToken;
+	dispatch_once (&onceToken, ^{
+		if(access(LOGGING_PATH "/.jblogenable",F_OK)==0) jblogenable=true;
+	});
+
+	if(!jblogenable) return;
+
 	if (!errorLogsEnabled) return;
 	va_list va;
 	va_start(va, format);

@@ -10,13 +10,14 @@ extern int (*posix_spawn_orig)(pid_t *restrict, const char *restrict, const posi
 void boomerang_userspaceRebootIncoming()
 {
 	// Fix Xcode debugging being broken after the userspace reboot
-	unmount("/Developer", MNT_FORCE);
+	// int retval = unmount("/Developer", MNT_FORCE);
+	// JBLogDebug("unmount /Developer : %d %d,%s", retval, errno, strerror(errno));
 
 	pid_t boomerangPid = 0;
 
 	// Wait until boomerang process has initialized primitives
 	dispatch_semaphore_t sema = dispatch_semaphore_create(0);
-	FCHandler *handler = [[FCHandler alloc] initWithReceiveFilePath:prebootPath(@"basebin/.communication/boomerang_to_launchd") sendFilePath:prebootPath(@"basebin/.communication/launchd_to_boomerang")];
+	FCHandler *handler = [[FCHandler alloc] initWithReceiveFilePath:jbrootPath(@"/var/.communication/boomerang_to_launchd") sendFilePath:jbrootPath(@"/var/.communication/launchd_to_boomerang")];
 	__weak FCHandler *weakHandler = handler;
 	handler.receiveHandler = ^(NSDictionary *message) {
 		NSString *identifier = message[@"id"];
@@ -38,8 +39,10 @@ void boomerang_userspaceRebootIncoming()
 		}
 	};
 
-	int ret = posix_spawn_orig(&boomerangPid, prebootPath(@"basebin/boomerang").fileSystemRepresentation, NULL, NULL, NULL, NULL);
+	int ret = posix_spawn_orig(&boomerangPid, jbrootPath(@"/basebin/boomerang").fileSystemRepresentation, NULL, NULL, NULL, NULL);
 	if (ret != 0) return;
+
+	JBLogDebug("boomerangPid=%d", boomerangPid);
 
 	dispatch_semaphore_wait(sema, DISPATCH_TIME_FOREVER);
 }

@@ -54,7 +54,8 @@ void machoGetInfo(FILE* candidateFile, bool *isMachoOut, bool *isLibraryOut)
 		fseek(candidateFile, anyArchOffset, SEEK_SET);
 		fread(&mh, sizeof(mh), 1, candidateFile);
 
-		isLibrary = OSSwapLittleToHostInt32(mh.filetype) == MH_DYLIB || OSSwapLittleToHostInt32(mh.filetype) == MH_DYLIB_STUB;
+		//isLibrary = OSSwapLittleToHostInt32(mh.filetype) == MH_DYLIB || OSSwapLittleToHostInt32(mh.filetype) == MH_DYLIB_STUB; //and MH_BUNDLE
+		isLibrary = OSSwapLittleToHostInt32(mh.filetype) != MH_EXECUTE;
 	}
 
 	if (isMachoOut) *isMachoOut = isMacho;
@@ -70,6 +71,10 @@ int64_t machoFindArch(FILE *machoFile, uint32_t subtypeToSearch)
 		fseek(machoFile, archOffset, SEEK_SET);
 		fread(&mh, sizeof(mh), 1, machoFile);
 		uint32_t maskedSubtype = OSSwapLittleToHostInt32(mh.cpusubtype);
+
+		if(OSSwapLittleToHostInt32(mh.filetype)==MH_EXECUTE && maskedSubtype==CPU_SUBTYPE_ARM64E)
+			return; //skip arm64e old ABI for executable on ios15
+
 		if (maskedSubtype == subtypeToSearch) {
 			outArchOffset = archOffset;
 			*stop = YES;
@@ -81,19 +86,19 @@ int64_t machoFindArch(FILE *machoFile, uint32_t subtypeToSearch)
 
 int64_t machoFindBestArch(FILE *machoFile)
 {
+	int64_t archOffsetCandidate = 0;
 #if __arm64e__
-	int64_t archOffsetCandidate = machoFindArch(machoFile, CPU_SUBTYPE_ARM64E|0x80000000);
+	archOffsetCandidate = machoFindArch(machoFile, CPU_SUBTYPE_ARM64E | 0x80000000); // arm64e new ABI
 	if (archOffsetCandidate < 0) {
-		archOffsetCandidate = machoFindArch(machoFile, CPU_SUBTYPE_ARM64E);
-	}
-	if (archOffsetCandidate < 0) {
-		archOffsetCandidate = machoFindArch(machoFile, CPU_SUBTYPE_ARM64_ALL);
-	}
-	return archOffsetCandidate;
-#else
-	int64_t archOffsetCandidate = machoFindArch(machoFile, CPU_SUBTYPE_ARM64_ALL);
-	return archOffsetCandidate;
+		archOffsetCandidate = machoFindArch(machoFile, CPU_SUBTYPE_ARM64E); // arm64e old ABI
+		if (archOffsetCandidate < 0) {
 #endif
+			archOffsetCandidate = machoFindArch(machoFile, CPU_SUBTYPE_ARM64_ALL);
+#if __arm64e__
+  		}
+	}
+#endif
+	return archOffsetCandidate;
 }
 
 void machoEnumerateLoadCommands(FILE *machoFile, uint32_t archOffset, void (^enumerateBlock)(struct load_command cmd, uint32_t cmdOffset))
@@ -130,35 +135,53 @@ void machoFindCSData(FILE* machoFile, uint32_t archOffset, uint32_t* outOffset, 
 	});
 }
 
-NSString *processRpaths(NSString *path, NSString *tokenName, NSArray *rpaths)
+NSString *resolveLoadPath(NSString *loadPath, NSString *loaderPath, NSString *executablePath, NSArray *rpaths)
 {
-	if (!rpaths) return path;
+	if (!loadPath || !loaderPath) return nil;
 
-	if ([path containsString:tokenName]) {
-		for (NSString *rpath in rpaths) {
-			NSString *testPath = [path stringByReplacingOccurrencesOfString:tokenName withString:rpath];
-			if ([[NSFileManager defaultManager] fileExistsAtPath:testPath]) {
-				return testPath;
-			}
+	JBLogDebug("resolveLoadPath %s,%s,%s\n", loadPath.UTF8String, loaderPath.UTF8String, executablePath.UTF8String);
+
+	if ([loadPath hasPrefix:@"@loader_path/"])
+		return [loadPath stringByReplacingOccurrencesOfString:@"@loader_path" withString:[loaderPath stringByDeletingLastPathComponent]];
+
+	if ([loadPath hasPrefix:@"@executable_path/"])
+		return [loadPath stringByReplacingOccurrencesOfString:@"@executable_path" withString:[executablePath stringByDeletingLastPathComponent]];
+
+	if ([loadPath hasPrefix:@"@rpath/"]) for (__strong NSString *rpath in rpaths) 
+	{
+		if ([rpath hasPrefix:@"@loader_path/"]) {
+			rpath = [rpath stringByReplacingOccurrencesOfString:@"@loader_path" withString:[loaderPath stringByDeletingLastPathComponent]];
+		}
+		else if ([rpath hasPrefix:@"@executable_path/"]) {
+			rpath = [rpath stringByReplacingOccurrencesOfString:@"@executable_path" withString:[executablePath stringByDeletingLastPathComponent]];
+		}
+		else if([rpath hasPrefix:@"/"]) {
+
+		}
+		else {
+			// Relative paths.
+			continue; //not support yet
+		}
+
+		NSString *testPath = [loadPath stringByReplacingOccurrencesOfString:@"@rpath" withString:rpath];
+		JBLogDebug("testPath=%s\n", testPath.UTF8String);
+		if ([[NSFileManager defaultManager] fileExistsAtPath:testPath]) {
+			return testPath;
 		}
 	}
-	return path;
+
+	if([loadPath hasPrefix:@"@"]) //check in dyld
+		return nil; //not found or not supported
+
+	if(![loadPath hasPrefix:@"/"]) {
+		// Relative paths.
+		return nil; //not support yet
+	}
+
+	return loadPath;
 }
 
-NSString *resolveLoadPath(NSString *loadPath, NSString *machoPath, NSString *sourceExecutablePath, NSArray *rpaths)
-{
-	if (!loadPath || !machoPath) return nil;
-
-	NSString *processedPath = processRpaths(loadPath, @"@rpath", rpaths);
-	processedPath = processRpaths(processedPath, @"@executable_path", rpaths);
-	processedPath = processRpaths(processedPath, @"@loader_path", rpaths);
-	processedPath = [processedPath stringByReplacingOccurrencesOfString:@"@executable_path" withString:[sourceExecutablePath stringByDeletingLastPathComponent]];
-	processedPath = [processedPath stringByReplacingOccurrencesOfString:@"@loader_path" withString:[machoPath stringByDeletingLastPathComponent]];
-
-	return processedPath;
-}
-
-void _machoEnumerateDependencies(FILE *machoFile, uint32_t archOffset, NSString *machoPath, NSString *sourceExecutablePath, NSMutableSet *enumeratedCache, void (^enumerateBlock)(NSString *dependencyPath))
+void _machoEnumerateDependencies(FILE *machoFile, uint32_t archOffset, NSString *machoPath, NSString *executablePath, NSMutableSet *enumeratedCache, void (^enumerateBlock)(NSString *dependencyPath))
 {
 	if (!enumeratedCache) enumeratedCache = [NSMutableSet new];
 
@@ -170,84 +193,98 @@ void _machoEnumerateDependencies(FILE *machoFile, uint32_t archOffset, NSString 
 			fseek(machoFile, cmdOffset, SEEK_SET);
 			fread(&rpathCommand, sizeof(rpathCommand), 1, machoFile);
 
-			size_t stringLength = OSSwapLittleToHostInt32(rpathCommand.cmdsize) - sizeof(rpathCommand);
+			long stringLength = OSSwapLittleToHostInt32(rpathCommand.cmdsize) - sizeof(rpathCommand);
+
+			if(stringLength <= 0) return;
+
 			char* rpathC = malloc(stringLength);
 			fseek(machoFile, cmdOffset + OSSwapLittleToHostInt32(rpathCommand.path.offset), SEEK_SET);
 			fread(rpathC,stringLength,1,machoFile);
 			NSString *rpath = [NSString stringWithUTF8String:rpathC];
 			free(rpathC);
 
-			NSString *resolvedRpath = resolveLoadPath(rpath, machoPath, sourceExecutablePath, nil);
-			if (resolvedRpath) {
-				[rpaths addObject:resolvedRpath];
-			}
+			if(rpath.length <= 0) return;
+
+			[rpaths addObject:rpath];
 		}
 	});
 
 	// Second iteration: Find dependencies
 	machoEnumerateLoadCommands(machoFile, archOffset, ^(struct load_command cmd, uint32_t cmdOffset) {
 		uint32_t cmdId = OSSwapLittleToHostInt32(cmd.cmd);
-		if (cmdId == LC_LOAD_DYLIB || cmdId == LC_LOAD_WEAK_DYLIB || cmdId == LC_REEXPORT_DYLIB) {
+		if (cmdId == LC_LOAD_DYLIB || cmdId == LC_LOAD_WEAK_DYLIB || cmdId == LC_REEXPORT_DYLIB || cmdId == LC_LAZY_LOAD_DYLIB || cmdId == LC_LOAD_UPWARD_DYLIB) {
 			struct dylib_command dylibCommand;
 			fseek(machoFile, cmdOffset, SEEK_SET);
 			fread(&dylibCommand,sizeof(dylibCommand),1,machoFile);
-			size_t stringLength = OSSwapLittleToHostInt32(dylibCommand.cmdsize) - sizeof(dylibCommand);
+			long stringLength = OSSwapLittleToHostInt32(dylibCommand.cmdsize) - sizeof(dylibCommand);
+
+			if(stringLength <=0) return;
+
 			char *imagePathC = malloc(stringLength);
 			fseek(machoFile, cmdOffset + OSSwapLittleToHostInt32(dylibCommand.dylib.name.offset), SEEK_SET);
 			fread(imagePathC, stringLength, 1, machoFile);
 			NSString *imagePath = [NSString stringWithUTF8String:imagePathC];
 			free(imagePathC);
 
-			BOOL inDSC = _dyld_shared_cache_contains_path(imagePath.fileSystemRepresentation);
-			if (!inDSC) {
-				NSString *resolvedPath = resolveLoadPath(imagePath, machoPath, sourceExecutablePath, rpaths);
-				resolvedPath = [[resolvedPath stringByResolvingSymlinksInPath] stringByStandardizingPath];
-				if (![enumeratedCache containsObject:resolvedPath] && [[NSFileManager defaultManager] fileExistsAtPath:resolvedPath]) {
-					[enumeratedCache addObject:resolvedPath];
-					enumerateBlock(resolvedPath);
+			if(imagePath.length <= 0) return;
 
-					JBLogDebug("[_machoEnumerateDependencies] Found depdendency %s, recursively enumerating over it...", resolvedPath.UTF8String);
-					FILE *nextFile = fopen(resolvedPath.fileSystemRepresentation, "rb");
-					if (nextFile) {
-						BOOL nextFileIsMacho = NO;
-						machoGetInfo(nextFile, &nextFileIsMacho, NULL);
-						if (nextFileIsMacho) {
-							int64_t nextBestArchCandidate = machoFindBestArch(nextFile);
-							if (nextBestArchCandidate >= 0) {
-								_machoEnumerateDependencies(nextFile, nextBestArchCandidate, resolvedPath, sourceExecutablePath, enumeratedCache, enumerateBlock);
-							}
-							else {
-								JBLogError("[_machoEnumerateDependencies] Failed to find best arch of dependency %s", resolvedPath.UTF8String);
-							}
-						}
-						else {
-							JBLogError("[_machoEnumerateDependencies] Dependency %s does not seem to be a macho", resolvedPath.UTF8String);
-						}
-						fclose(nextFile);
-					}
-					else {
-						JBLogError("[_machoEnumerateDependencies] Dependency %s does not seem to exist, maybe path resolving failed?", resolvedPath.UTF8String);
-					}
+			if(_dyld_shared_cache_contains_path(imagePath.fileSystemRepresentation)) {
+				JBLogDebug("[_machoEnumerateDependencies] Skipped dependency %s, in dyld_shared_cache", imagePath.UTF8String);
+				return;
+			}
+			
+			NSString *resolvedPath = resolveLoadPath(imagePath, machoPath, executablePath, rpaths); 
+
+			if(!resolvedPath) {
+				JBLogError("[_machoEnumerateDependencies] Skipped dependency %s, invalid", imagePath.UTF8String);
+				return;
+			}
+
+			resolvedPath = [[resolvedPath stringByResolvingSymlinksInPath] stringByStandardizingPath];
+
+			if (![[NSFileManager defaultManager] fileExistsAtPath:resolvedPath]) {
+				JBLogError("[_machoEnumerateDependencies] Skipped dependency %s, non existant", resolvedPath.UTF8String);
+				return;
+			}
+
+			if([enumeratedCache containsObject:resolvedPath]) {
+				JBLogDebug("[_machoEnumerateDependencies] Skipped dependency %s, already cached", resolvedPath.UTF8String);
+				return;
+			}
+
+			[enumeratedCache addObject:resolvedPath];
+			enumerateBlock(resolvedPath);
+
+			JBLogDebug("[_machoEnumerateDependencies] Found depdendency %s, recursively enumerating over it...", resolvedPath.UTF8String);
+			FILE *nextFile = fopen(resolvedPath.fileSystemRepresentation, "rb");
+			if (!nextFile) {
+				JBLogError("[_machoEnumerateDependencies] Dependency %s does not seem to exist, maybe path resolving failed?", resolvedPath.UTF8String);
+				return;
+			}
+
+			BOOL nextFileIsMacho = NO;
+			machoGetInfo(nextFile, &nextFileIsMacho, NULL);
+			if (nextFileIsMacho) {
+				int64_t nextBestArchCandidate = machoFindBestArch(nextFile);
+				if (nextBestArchCandidate >= 0) {
+					_machoEnumerateDependencies(nextFile, nextBestArchCandidate, resolvedPath, executablePath, enumeratedCache, enumerateBlock);
 				}
 				else {
-					if (![[NSFileManager defaultManager] fileExistsAtPath:resolvedPath]) {
-						JBLogError("[_machoEnumerateDependencies] Skipped dependency %s, non existant", resolvedPath.UTF8String);
-					}
-					else {
-						JBLogDebug("[_machoEnumerateDependencies] Skipped dependency %s, already cached", resolvedPath.UTF8String);
-					}
+					JBLogError("[_machoEnumerateDependencies] Failed to find best arch of dependency %s", resolvedPath.UTF8String);
 				}
 			}
 			else {
-				JBLogDebug("[_machoEnumerateDependencies] Skipped dependency %s, in dyld_shared_cache", imagePath.UTF8String);
+				JBLogError("[_machoEnumerateDependencies] Dependency %s does not seem to be a macho", resolvedPath.UTF8String);
 			}
+			fclose(nextFile);
+
 		}
 	});
 }
 
-void machoEnumerateDependencies(FILE *machoFile, uint32_t archOffset, NSString *machoPath, void (^enumerateBlock)(NSString *dependencyPath))
+void machoEnumerateDependencies(FILE *machoFile, uint32_t archOffset, NSString *machoPath, NSString *executablePath, void (^enumerateBlock)(NSString *dependencyPath))
 {
-	_machoEnumerateDependencies(machoFile, archOffset, machoPath, machoPath, nil, enumerateBlock);
+	_machoEnumerateDependencies(machoFile, archOffset, machoPath, executablePath, nil, enumerateBlock);
 }
 
 unsigned CSCodeDirectoryRank(CS_CodeDirectory *cd) {

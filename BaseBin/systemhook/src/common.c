@@ -14,14 +14,25 @@
 int posix_spawnattr_getprocesstype_np(const posix_spawnattr_t * __restrict, int * __restrict) __API_AVAILABLE(macos(10.8), ios(6.0));
 
 char *JB_SandboxExtensions = NULL;
+char *JB_SandboxExtensions2 = NULL;
 char *JB_RootPath = NULL;
 
-#define HOOK_DYLIB_PATH "/usr/lib/systemhook.dylib"
+char* JBRAND=NULL;
+char* JBROOT=NULL;
+
+extern char HOOK_DYLIB_PATH[];
+
 #define JBD_MSG_SETUID_FIX 21
 #define JBD_MSG_PROCESS_BINARY 22
 #define JBD_MSG_DEBUG_ME 24
 #define JBD_MSG_FORK_FIX 25
 #define JBD_MSG_INTERCEPT_USERSPACE_PANIC 26
+
+#define JBD_MSG_REBOOT_USERSPACE 1000
+#define JBD_MSG_PATCH_SPAWN  1001
+#define JBD_MSG_PATCH_EXEC_ADD  1002
+#define JBD_MSG_PATCH_EXEC_DEL  1003
+#define JBD_MSG_LOCK_DSC_PAGE	1004
 
 #define JETSAM_MULTIPLIER 3
 #define XPC_TIMEOUT 0.1 * NSEC_PER_SEC
@@ -29,7 +40,8 @@ char *JB_RootPath = NULL;
 #define POSIX_SPAWNATTR_OFF_MEMLIMIT_ACTIVE 0x48
 #define POSIX_SPAWNATTR_OFF_MEMLIMIT_INACTIVE 0x4C
 
-bool swh_is_debugged = false;
+// jit auto enabled (suspend spawn)
+bool swh_is_debugged = true;
 
 bool stringStartsWith(const char *str, const char* prefix)
 {
@@ -167,7 +179,8 @@ int64_t jbdswProcessBinary(const char *filePath)
 	struct statfs fs;
 	int sfsret = statfs(filePath, &fs);
 	if (sfsret == 0) {
-		if (!strcmp(fs.f_mntonname, "/") || !strcmp(fs.f_mntonname, "/usr/lib")) return -1;
+		if (strcmp(fs.f_mntonname, "/private/var") != 0)
+			return -1;
 	}
 
 	char absolutePath[PATH_MAX];
@@ -206,6 +219,78 @@ int64_t jbdswDebugMe(void)
 	if (result == 0) {
 		swh_is_debugged = true;
 	} 
+	return result;
+}
+
+int64_t jbdswRebootUserspace()
+{
+	xpc_object_t message = xpc_dictionary_create_empty();
+	xpc_dictionary_set_uint64(message, "id", JBD_MSG_REBOOT_USERSPACE);
+	xpc_object_t reply = sendJBDMessageSystemWide(message);
+	int64_t result = -1;
+	if (reply) {
+		result  = xpc_dictionary_get_int64(reply, "result");
+		xpc_release(reply);
+	}
+	return result;
+}
+
+int64_t jbdswPatchSpawn(int pid, bool resume)
+{
+	xpc_object_t message = xpc_dictionary_create_empty();
+	xpc_dictionary_set_uint64(message, "id", JBD_MSG_PATCH_SPAWN);
+	xpc_dictionary_set_int64(message, "pid", pid);
+	xpc_dictionary_set_bool(message, "resume", resume);
+	xpc_object_t reply = sendJBDMessageSystemWide(message);
+	int64_t result = -1;
+	if (reply) {
+		result  = xpc_dictionary_get_int64(reply, "result");
+		xpc_release(reply);
+	}
+	return result;
+}
+
+int64_t jbdswLockDSCPage(uint64_t address, uint64_t size)
+{
+	xpc_object_t message = xpc_dictionary_create_empty();
+	xpc_dictionary_set_uint64(message, "id", JBD_MSG_LOCK_DSC_PAGE);
+	xpc_dictionary_set_uint64(message, "addr", address);
+	xpc_dictionary_set_uint64(message, "size", size);
+	xpc_object_t reply = sendJBDMessageSystemWide(message);
+	int64_t result = -1;
+	if (reply) {
+		result  = xpc_dictionary_get_int64(reply, "result");
+		xpc_release(reply);
+	}
+	return result;
+}
+
+int64_t jbdswPatchExecAdd(const char* execfile, bool resume)
+{
+	xpc_object_t message = xpc_dictionary_create_empty();
+	xpc_dictionary_set_uint64(message, "id", JBD_MSG_PATCH_EXEC_ADD);
+	xpc_dictionary_set_string(message, "execfile", execfile);
+	xpc_dictionary_set_bool(message, "resume", resume);
+	xpc_object_t reply = sendJBDMessageSystemWide(message);
+	int64_t result = -1;
+	if (reply) {
+		result  = xpc_dictionary_get_int64(reply, "result");
+		xpc_release(reply);
+	}
+	return result;
+}
+
+int64_t jbdswPatchExecDel(const char* execfile)
+{
+	xpc_object_t message = xpc_dictionary_create_empty();
+	xpc_dictionary_set_uint64(message, "id", JBD_MSG_PATCH_EXEC_DEL);
+	xpc_dictionary_set_string(message, "execfile", execfile);
+	xpc_object_t reply = sendJBDMessageSystemWide(message);
+	int64_t result = -1;
+	if (reply) {
+		result  = xpc_dictionary_get_int64(reply, "result");
+		xpc_release(reply);
+	}
 	return result;
 }
 
@@ -253,8 +338,13 @@ int resolvePath(const char *file, const char *searchPath, int (^attemptHandler)(
 	struct stat sb;
 	char path_buf[PATH_MAX];
 
-	if ((env_path = getenv("PATH")) == NULL)
-		env_path = _PATH_DEFPATH;
+	env_path = searchPath;
+	if (!env_path) {
+		env_path = getenv("PATH");
+		if (!env_path) {
+			env_path = _PATH_DEFPATH;
+		}
+	}
 
 	/* If it's an absolute or relative path name, it's easy. */
 	if (index(file, '/')) {
@@ -357,35 +447,38 @@ typedef enum
 
 kBinaryConfig configForBinary(const char* path, char *const argv[restrict])
 {
-	// Don't do anything for jailbreakd because this wanting to launch implies it's not running currently
-	if (stringEndsWith(path, "/jailbreakd")) {
+	char abspath[PATH_MAX];
+	if (realpath(path, abspath) == NULL) {
 		return (kBinaryConfigDontInject | kBinaryConfigDontProcess);
 	}
 
-	if (!strcmp(path, "/usr/libexec/xpcproxy")) {
-		if (argv) {
-			if (argv[0]) {
-				if (argv[1]) {
-					if (!strcmp(argv[1], "com.opa334.jailbreakd")) {
-						// Don't do anything for xpcproxy if it's called on jailbreakd because this also implies jbd is not running currently
-						return (kBinaryConfigDontInject | kBinaryConfigDontProcess);
-					}
-					else if (!strcmp(argv[1], "com.apple.ReportCrash")) {
-						// Skip ReportCrash too as it might need to execute while jailbreakd is in a crashed state
-						return (kBinaryConfigDontInject | kBinaryConfigDontProcess);
-					}
-					else if (!strcmp(argv[1], "com.apple.ReportMemoryException")) {
-						// Skip ReportMemoryException too as it might need to execute while jailbreakd is in a crashed state
-						return (kBinaryConfigDontInject | kBinaryConfigDontProcess);
-					}
-				}
+	// Don't do anything for jailbreakd because this wanting to launch implies it's not running currently
+	if (stringEndsWith(abspath, "/basebin/jailbreakd")) {
+		return (kBinaryConfigDontInject | kBinaryConfigDontProcess);
+	}
+
+	// Don't do anything for xpcproxy if it's called on jailbreakd because this also implies jbd is not running currently
+	if (!strcmp(abspath, "/usr/libexec/xpcproxy") || stringEndsWith(abspath,"/basebin/xpcproxy")) {
+		if (argv && argv[0] && argv[1]) {
+			if (!strcmp(argv[1], "com.opa334.jailbreakd")) {
+				return (kBinaryConfigDontInject | kBinaryConfigDontProcess);
+			}
+			if (!strcmp(argv[1], "com.apple.ReportCrash")) { //main
+				return (kBinaryConfigDontInject | kBinaryConfigDontProcess);
+			}
+			else if (!strcmp(argv[1], "com.apple.ReportMemoryException")) {
+				// Skip ReportMemoryException too as it might need to execute while jailbreakd is in a crashed state
+				return (kBinaryConfigDontInject | kBinaryConfigDontProcess);
 			}
 		}
+
+		return kBinaryConfigDontProcess;
 	}
 
 	// Blacklist to ensure general system stability
 	// I don't like this but for some processes it seems neccessary
 	const char *processBlacklist[] = {
+		"/System/Library/CoreServices/ReportCrash", //??
 		"/System/Library/Frameworks/GSS.framework/Helpers/GSSCred",
 		"/System/Library/PrivateFrameworks/IDSBlastDoorSupport.framework/XPCServices/IDSBlastDoorService.xpc/IDSBlastDoorService",
 		"/System/Library/PrivateFrameworks/MessagesBlastDoorSupport.framework/XPCServices/MessagesBlastDoorService.xpc/MessagesBlastDoorService",
@@ -394,14 +487,38 @@ kBinaryConfig configForBinary(const char* path, char *const argv[restrict])
 	size_t blacklistCount = sizeof(processBlacklist) / sizeof(processBlacklist[0]);
 	for (size_t i = 0; i < blacklistCount; i++)
 	{
-		if (!strcmp(processBlacklist[i], path)) return (kBinaryConfigDontInject | kBinaryConfigDontProcess);
+		if (!strcmp(processBlacklist[i], abspath)) return (kBinaryConfigDontInject | kBinaryConfigDontProcess);
 	}
 
 	return 0;
 }
 
-// Make sure the about to be spawned binary and all of it's dependencies are trust cached
-// Insert "DYLD_INSERT_LIBRARIES=/usr/lib/systemhook.dylib" into all binaries spawned
+#define APP_PATH_PREFIX "/private/var/containers/Bundle/Application/"
+
+bool is_app_path(const char* path)
+{
+    if(!path) return false;
+
+    char rp[PATH_MAX];
+    if(!realpath(path, rp)) return false;
+
+    if(strncmp(rp, APP_PATH_PREFIX, sizeof(APP_PATH_PREFIX)-1) != 0)
+        return false;
+
+    char* p1 = rp + sizeof(APP_PATH_PREFIX)-1;
+    char* p2 = strchr(p1, '/');
+    if(!p2) return false;
+
+    //is normal app or jailbroken app/daemon?
+    if((p2 - p1) != (sizeof("xxxxxxxx-xxxx-xxxx-yxxx-xxxxxxxxxxxx")-1))
+        return false;
+
+	return true;
+}
+
+
+// 1. Make sure the about to be spawned binary and all of it's dependencies are trust cached
+// 2. Insert "DYLD_INSERT_LIBRARIES=/usr/lib/systemhook.dylib" into all binaries spawned
 
 int spawn_hook_common(pid_t *restrict pid, const char *restrict path,
 					   const posix_spawn_file_actions_t *restrict file_actions,
@@ -445,6 +562,16 @@ int spawn_hook_common(pid_t *restrict pid, const char *restrict path,
 		JBEnvAlreadyInsertedCount++;
 	}
 
+	if (envbuf_getenv((const char **)envp, "JBRAND")) {
+		JBEnvAlreadyInsertedCount++;
+	}
+	if (envbuf_getenv((const char **)envp, "JBROOT")) {
+		JBEnvAlreadyInsertedCount++;
+	}
+
+	struct statfs fs;
+	bool isPlatformProcess = statfs(path, &fs)==0 && strcmp(fs.f_mntonname, "/private/var") != 0;
+
 	// Check if we can find at least one reason to not insert jailbreak related environment variables
 	// In this case we also need to remove pre existing environment variables if they are already set
 	bool shouldInsertJBEnv = true;
@@ -455,20 +582,22 @@ int spawn_hook_common(pid_t *restrict pid, const char *restrict path,
 			break;
 		}
 
+		bool isAppPath = is_app_path(path);
+
 		// Check if we can find a _SafeMode or _MSSafeMode variable
 		// In this case we do not want to inject anything
 		const char *safeModeValue = envbuf_getenv((const char **)envp, "_SafeMode");
 		const char *msSafeModeValue = envbuf_getenv((const char **)envp, "_MSSafeMode");
 		if (safeModeValue) {
 			if (!strcmp(safeModeValue, "1")) {
-				shouldInsertJBEnv = false;
+				if(isPlatformProcess||isAppPath) shouldInsertJBEnv = false;
 				hasSafeModeVariable = true;
 				break;
 			}
 		}
 		if (msSafeModeValue) {
 			if (!strcmp(msSafeModeValue, "1")) {
-				shouldInsertJBEnv = false;
+				if(isPlatformProcess||isAppPath) shouldInsertJBEnv = false;
 				hasSafeModeVariable = true;
 				break;
 			}
@@ -508,7 +637,8 @@ int spawn_hook_common(pid_t *restrict pid, const char *restrict path,
 		}
 	}
 
-	if ((shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 3) || (!shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 0 && !hasSafeModeVariable)) {
+	if ((shouldInsertJBEnv && JBEnvAlreadyInsertedCount == JB_ENV_REQUIRED_COUNT)
+		 || (!shouldInsertJBEnv && JBEnvAlreadyInsertedCount == 0 && !hasSafeModeVariable)) {
 		// we already good, just call orig
 		return pspawn_orig(pid, path, file_actions, attrp, argv, envp);
 	}
@@ -525,11 +655,21 @@ int spawn_hook_common(pid_t *restrict pid, const char *restrict path,
 					strcat(newLibraryInsert, ":");
 					strcat(newLibraryInsert, existingLibraryInserts);
 				}
-				envbuf_setenv(&envc, "DYLD_INSERT_LIBRARIES", newLibraryInsert);
+				envbuf_setenv(&envc, "DYLD_INSERT_LIBRARIES", newLibraryInsert, 1);
 			}
 
-			envbuf_setenv(&envc, "JB_SANDBOX_EXTENSIONS", JB_SandboxExtensions);
-			envbuf_setenv(&envc, "JB_ROOT_PATH", JB_RootPath);
+			char* unsandbox = JB_SandboxExtensions;
+			if (getpid()==1 && isPlatformProcess) 
+			{
+				unsandbox = JB_SandboxExtensions2; //only unsandbox jbroot:/var/ for system process
+			}
+
+			envbuf_setenv(&envc, "JB_SANDBOX_EXTENSIONS", unsandbox, 1);
+			envbuf_setenv(&envc, "JB_ROOT_PATH", JB_RootPath, 1);
+			
+			//allow to overwrite for testing
+			envbuf_setenv(&envc, "JBRAND", JBRAND, 0);
+			envbuf_setenv(&envc, "JBROOT", JBROOT, 0);
 		}
 		else {
 			if (systemHookAlreadyInserted && existingLibraryInserts) {
@@ -553,7 +693,7 @@ int spawn_hook_common(pid_t *restrict pid, const char *restrict path,
 							}
 						}
 					});
-					envbuf_setenv(&envc, "DYLD_INSERT_LIBRARIES", newLibraryInsert);
+					envbuf_setenv(&envc, "DYLD_INSERT_LIBRARIES", newLibraryInsert, 1);
 
 					free(newLibraryInsert);
 				}
@@ -562,6 +702,9 @@ int spawn_hook_common(pid_t *restrict pid, const char *restrict path,
 			envbuf_unsetenv(&envc, "_MSSafeMode");
 			envbuf_unsetenv(&envc, "JB_SANDBOX_EXTENSIONS");
 			envbuf_unsetenv(&envc, "JB_ROOT_PATH");
+
+			envbuf_unsetenv(&envc, "JBRAND");
+			envbuf_unsetenv(&envc, "JBROOT");
 		}
 
 		int retval = pspawn_orig(pid, path, file_actions, attrp, argv, envc);

@@ -17,46 +17,25 @@ extern const uint8_t *der_decode_plist(CFAllocatorRef allocator, CFTypeRef* outp
 extern const uint8_t *der_encode_plist(CFTypeRef input, CFErrorRef *error, const uint8_t *der_start, const uint8_t *der_end);
 extern size_t der_sizeof_plist(CFPropertyListRef pl, CFErrorRef *error);
 
-NSString *prebootPath(NSString *path)
+NSString *jbrootPath(NSString *path)
 {
-	static NSString *sPrebootPrefix = nil;
+	//sh!t autoreleasepool crash! static NSString *jbroot = nil;
+
+	static NSString *jbroot = nil;
+
 	static dispatch_once_t onceToken;
 	dispatch_once (&onceToken, ^{
-		NSMutableString* bootManifestHashStr;
-		io_registry_entry_t registryEntry = IORegistryEntryFromPath(kIOMainPortDefault, "IODeviceTree:/chosen");
-		if (registryEntry) {
-			CFDataRef bootManifestHash = (CFDataRef)IORegistryEntryCreateCFProperty(registryEntry, CFSTR("boot-manifest-hash"), kCFAllocatorDefault, 0);
-			if (bootManifestHash) {
-				const UInt8* buffer = CFDataGetBytePtr(bootManifestHash);
-				bootManifestHashStr = [NSMutableString stringWithCapacity:(CFDataGetLength(bootManifestHash) * 2)];
-				for (CFIndex i = 0; i < CFDataGetLength(bootManifestHash); i++) {
-					[bootManifestHashStr appendFormat:@"%02X", buffer[i]];
-				}
-				CFRelease(bootManifestHash);
+		NSArray *subItems = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:@"/var/containers/Bundle/Application/" error:nil];
+		for (NSString *subItem in subItems) {
+			if ([subItem hasPrefix:@".jbroot-"]) {
+				jbroot = [@"/var/containers/Bundle/Application/" stringByAppendingPathComponent:subItem]; //stringByAppendingPathComponent:@"procursus"];
+				break;
 			}
-		}
-
-		if (bootManifestHashStr) {
-			NSString *activePrebootPath = [@"/private/preboot/" stringByAppendingPathComponent:bootManifestHashStr];
-			NSArray *subItems = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:activePrebootPath error:nil];
-			for (NSString *subItem in subItems) {
-				if ([subItem hasPrefix:@"jb-"]) {
-					sPrebootPrefix = [[activePrebootPath stringByAppendingPathComponent:subItem] stringByAppendingPathComponent:@"procursus"];
-					break;
-				}
-			}
-		}
-		else {
-			sPrebootPrefix = @"/var/jb";
 		}
 	});
 
-	if (path) {
-		return [sPrebootPrefix stringByAppendingPathComponent:path];
-	}
-	else {
-		return sPrebootPrefix;
-	}
+	assert(jbroot != nil);
+	return [jbroot stringByAppendingPathComponent:path];
 }
 
 int kalloc(uint64_t *addr, uint64_t size)
@@ -418,12 +397,13 @@ uint64_t ucred_get_cr_label(uint64_t ucred_ptr)
 
 uint64_t task_get_first_thread(uint64_t task_ptr)
 {
+	//task->threads->prev
 	return kread_ptr(task_ptr + 0x60);
 }
 
 uint64_t thread_get_act_context(uint64_t thread_ptr)
 {
-	uint64_t actContextOffset = bootInfo_getUInt64(@"ACT_CONTEXT");
+	uint64_t actContextOffset = bootInfo_getUInt64(@"ACT_CONTEXT"); //actually this is upcb offset (but upcb=contextData for user thread
 	return kread_ptr(thread_ptr + actContextOffset);
 }
 
@@ -931,11 +911,13 @@ int proc_set_debugged(uint64_t proc_ptr, bool fully_debugged)
 	// This enabled hooks without being detectable at all, as cs_ops will not return CS_DEBUGGED
 	pmap_set_wx_allowed(pmap, true);
 
-	if (fully_debugged) {
+	if (fully_debugged) 
+	{
 		// When coming from ptrace, we want to fully emulate cs_allow_invalid though
 
 		uint32_t flags = proc_get_csflags(proc_ptr) & ~(CS_KILL | CS_HARD);
-		if (flags & CS_VALID) {
+		if (flags & CS_VALID) 
+		{
 			flags |= CS_DEBUGGED;
 		}
 		proc_set_csflags(proc_ptr, flags);
@@ -950,16 +932,33 @@ int proc_set_debugged(uint64_t proc_ptr, bool fully_debugged)
 	return 0;
 }
 
+// int proc_set_debugged(uint64_t proc_ptr, bool fully_debugged)
+// {
+
+// 	uint32_t flags = proc_get_csflags(proc_ptr);
+	
+// 	flags = (flags | CS_GET_TASK_ALLOW | CS_DEBUGGED) & ~(CS_RESTRICT | CS_KILL | CS_HARD);
+
+// 	proc_set_csflags(proc_ptr, flags);
+
+// 	return 0;
+// }
+
 int proc_set_debugged_pid(pid_t pid, bool fully_debugged)
 {
 	int retval = -1;
 	if (pid > 0) {
 		bool proc_needs_release = false;
+
+		ksync_start();
+
 		uint64_t proc = proc_for_pid(pid, &proc_needs_release);
 		if (proc != 0) {
 			retval = proc_set_debugged(proc, fully_debugged);
 			if (proc_needs_release) proc_rele(proc);
 		}
+
+		ksync_finish();
 	}
 	return retval;
 }
@@ -987,6 +986,9 @@ int64_t proc_fix_setuid(pid_t pid)
 	struct stat sb;
 	if(stat(procPath.fileSystemRepresentation, &sb) == 0) {
 		if (S_ISREG(sb.st_mode) && (sb.st_mode & (S_ISUID | S_ISGID))) {
+
+			ksync_start();
+
 			bool proc_needs_release = false;
 			uint64_t proc = proc_for_pid(pid, &proc_needs_release);
 			uint64_t ucred = proc_get_ucred(proc);
@@ -1006,6 +1008,9 @@ int64_t proc_fix_setuid(pid_t pid)
 				proc_set_p_flag(proc, p_flag);
 			}
 			if (proc_needs_release) proc_rele(proc);
+
+			ksync_finish();
+
 			return 0;
 		}
 		else {
@@ -1019,6 +1024,8 @@ int64_t proc_fix_setuid(pid_t pid)
 
 void run_unsandboxed(void (^block)(void))
 {
+	ksync_start();
+
 	uint64_t selfProc = self_proc();
 	uint64_t selfUcred = proc_get_ucred(selfProc);
 	
@@ -1032,4 +1039,47 @@ void run_unsandboxed(void (^block)(void))
 	proc_set_ucred(selfProc, kernelUcred);
 	block();
 	proc_set_ucred(selfProc, selfUcred);
+
+	ksync_finish();
+}
+
+#include <pthread/pthread.h>
+/* kernel atomic operation sync */
+static pthread_rwlock_t  gksynclock = PTHREAD_RWLOCK_INITIALIZER;
+
+void ksync_lock() {
+	//pthread_rwlock_wrlock(&gksynclock);
+	//don't block recursive read lock
+	while(pthread_rwlock_trywrlock(&gksynclock) !=0);
+}
+
+void ksync_start() {
+    pthread_rwlock_rdlock(&gksynclock);
+}
+
+void ksync_finish() {
+    pthread_rwlock_unlock(&gksynclock);
+}
+
+int reboot3(uint64_t flags, ...);
+#define RB2_USERREBOOT (0x2000000000000000llu)
+void safeRebootUserspace()
+{
+
+	run_unsandboxed(^{
+	// Fix Xcode debugging being broken after the userspace reboot
+	int retval = unmount("/Developer", MNT_FORCE);
+	JBLogDebug("unmount /Developer : %d %d,%s", retval, errno, strerror(errno));
+	});
+
+	ksync_lock(); //wait all atomic kernel operation then lock 
+
+	sync();
+
+	reboot3(RB2_USERREBOOT);
+
+	while(true) {
+		JBLogDebug("wait for userspace reboot...");
+		sync();
+	}
 }

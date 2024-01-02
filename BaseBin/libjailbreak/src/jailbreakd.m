@@ -38,7 +38,9 @@ xpc_object_t sendJBDMessage(xpc_object_t xdict)
 		if (pipe) {
 			int err = xpc_pipe_routine(pipe, xdict, &xreply);
 			if (err != 0) {
-				JBLogError("xpc_pipe_routine error on sending message to jailbreakd: %d / %s", err, xpc_strerror(err));
+				char *desc = xpc_copy_description(xdict);
+				JBLogError("xpc_pipe_routine error on sending message to jailbreakd: %d / %s\n%s", err, xpc_strerror(err), desc);
+				free((void*)desc);
 				xreply = nil;
 			};
 		}
@@ -210,7 +212,8 @@ int64_t jbdProcessBinary(const char *filePath)
 	struct statfs fs;
 	int sfsret = statfs(filePath, &fs);
 	if (sfsret == 0) {
-		if (!strcmp(fs.f_mntonname, "/") || !strcmp(fs.f_mntonname, "/usr/lib")) return -1;
+		if (strcmp(fs.f_mntonname, "/private/var") != 0) 
+			return -1;
 	}
 
 	char absolutePath[PATH_MAX];
@@ -242,6 +245,16 @@ int64_t jbdSetFakelibVisible(bool visible)
 	xpc_object_t message = xpc_dictionary_create_empty();
 	xpc_dictionary_set_uint64(message, "id", JBD_SET_FAKELIB_VISIBLE);
 	xpc_dictionary_set_bool(message, "visible", visible);
+
+	xpc_object_t reply = sendJBDMessage(message);
+	if (!reply) return -10;
+	return xpc_dictionary_get_int64(reply, "result");
+}
+
+int64_t jbdRebootUserspace(void)
+{
+	xpc_object_t message = xpc_dictionary_create_empty();
+	xpc_dictionary_set_uint64(message, "id", JBD_MSG_REBOOT_USERSPACE);
 
 	xpc_object_t reply = sendJBDMessage(message);
 	if (!reply) return -10;

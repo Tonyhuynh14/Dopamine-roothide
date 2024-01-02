@@ -8,6 +8,9 @@
 #import "libjailbreak.h"
 #import <errno.h>
 
+#define JBLogDebug(format ...)
+#define JBLogError(format ...)
+
 #import <Foundation/Foundation.h>
 #define min(a,b) (((a)<(b))?(a):(b))
 

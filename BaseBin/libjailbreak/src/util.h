@@ -1,6 +1,6 @@
 #import <Foundation/Foundation.h>
 
-NSString *prebootPath(NSString *path);
+NSString *jbrootPath(NSString *path);
 
 typedef struct __attribute__((__packed__)) _vm_map_flags {
     unsigned int
@@ -133,3 +133,8 @@ NSString *proc_get_path(pid_t pid);
 int64_t proc_fix_setuid(pid_t pid);
 
 void run_unsandboxed(void (^block)(void));
+
+void ksync_lock();
+void ksync_start();
+void ksync_finish();
+void safeRebootUserspace();
